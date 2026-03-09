@@ -6,6 +6,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <io.h>
+
+// Compatibility for strdup
+char* my_strdup(const char* s) {
+    size_t len = strlen(s) + 1;
+    char* p = (char*)malloc(len);
+    return p ? (char*)memcpy(p, s, len) : NULL;
+}
+#define strdup my_strdup
+#define fileno _fileno
+
 #include "parser.tab.h"
 
 /* Line counter for error messages (provided by yylineno option) */
@@ -13,6 +24,7 @@
 
 %option noyywrap
 %option yylineno
+%option never-interactive
 %x COMMENT
 
 DIGIT      [0-9]
@@ -29,7 +41,6 @@ ID         {LETTER}({LETTER}|{DIGIT})*
 
 "set"              return SET;
 "iHaveAplan"       return TASK;
-"BangladeshCore"   return MODULE;
 
 "if"               return IF;
 "else"             return ELSE;
@@ -113,8 +124,13 @@ ID         {LETTER}({LETTER}|{DIGIT})*
 "="     return ASSIGN;
 ":"     return COLON;
 ";"     return SEMICOLON;
+","     return COMMA;
 "("     return LPAREN;
 ")"     return RPAREN;
+"["     return LBRACKET;
+"]"     return RBRACKET;
+"{"     return LBRACE;
+"}"     return RBRACE;
 
 {ID} {
     yylval.str = strdup(yytext);
