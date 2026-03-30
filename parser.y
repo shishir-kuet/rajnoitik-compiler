@@ -4,6 +4,8 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 extern int yylineno;  // Line number from lexer
 int yylex();
@@ -17,11 +19,16 @@ void yyerror(const char* s);
 %code {
     FILE* cppFile = NULL;
     ProgramNode* root = nullptr;
+    std::unordered_map<std::string, std::string> symbolTypes;
+    std::unordered_map<std::string, std::string> arrayElementTypes;
+    std::unordered_set<std::string> heteroArrays;
 
     // Forward declarations for code generation
     void generateCode(ASTNode* node, FILE* out);
     std::string generateExpression(ASTNode* node);
     std::string inferType(ASTNode* node);
+    bool isHeterogeneousElementType(const std::string& t);
+    bool isArrayDeclaredHeterogeneous(const ArrayDeclNode* arrDecl);
 }
 
 %union {
@@ -41,6 +48,7 @@ void yyerror(const char* s);
 %token RETURN READ
 %token READ_FILE WRITE_FILE
 %token TYPE_NUMBER TYPE_DECIMAL TYPE_LETTER TYPE_TEXT TYPE_BOOL
+%token BARAO KOMAO DOT
 %token <str> IDENTIFIER NUMBER DECIMAL STRING CHAR BOOLEAN
 %token PLUS MINUS MUL DIV MOD POW
 %token INC DEC
@@ -55,7 +63,7 @@ void yyerror(const char* s);
 %type <node> statement assignment compound_assignment increment_decrement 
 %type <node> print_stmt input_stmt if_stmt while_stmt repeat_stmt
 %type <node> function_def function_call return_stmt
-%type <node> array_decl array_access expression
+%type <node> array_decl array_access array_push array_pop expression
 %type <strList> param_list
 %type <nodeList> arg_list array_values
 
@@ -103,6 +111,8 @@ statement
     | function_call SEMICOLON { $$ = $1; }
     | return_stmt       { $$ = $1; }
     | array_decl        { $$ = $1; }
+    | array_push        { $$ = $1; }
+    | array_pop         { $$ = $1; }
     | array_access ASSIGN expression SEMICOLON 
     {
         $$ = new ArrayAssignmentNode(static_cast<ArrayAccessNode*>($1), $3);
@@ -297,6 +307,11 @@ array_decl
         $$ = new ArrayDeclNode($2, $5->size(), *$5);
         delete $5;
     }
+    | SET IDENTIFIER ASSIGN LBRACE RBRACE SEMICOLON
+    {
+        std::vector<ASTNode*> emptyVals;
+        $$ = new ArrayDeclNode($2, 0, emptyVals);
+    }
     ;
 
 array_values
@@ -316,6 +331,20 @@ array_access
     : IDENTIFIER LBRACKET expression RBRACKET
     {
         $$ = new ArrayAccessNode($1, $3);
+    }
+    ;
+
+array_push
+    : IDENTIFIER DOT BARAO LPAREN expression RPAREN SEMICOLON
+    {
+        $$ = new ArrayPushNode($1, $5);
+    }
+    ;
+
+array_pop
+    : IDENTIFIER DOT KOMAO LPAREN RPAREN SEMICOLON
+    {
+        $$ = new ArrayPopNode($1);
     }
     ;
 
@@ -404,6 +433,22 @@ void yyerror(const char* s) {
 
 // Code generation functions - traverse AST and generate C++
 
+bool isHeterogeneousElementType(const std::string& t) {
+    return t == "RSValue";
+}
+
+bool isArrayDeclaredHeterogeneous(const ArrayDeclNode* arrDecl) {
+    if (!arrDecl || arrDecl->initialValues.size() <= 1) return false;
+
+    std::string firstType = inferType(arrDecl->initialValues[0]);
+    for (size_t i = 1; i < arrDecl->initialValues.size(); i++) {
+        if (inferType(arrDecl->initialValues[i]) != firstType) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Infer C++ type from AST node
 std::string inferType(ASTNode* node) {
     if (!node) return "auto";
@@ -413,9 +458,13 @@ std::string inferType(ASTNode* node) {
             LiteralNode* lit = static_cast<LiteralNode*>(node);
             std::string val = lit->value;
             
-            // Check if it's a string (starts with quote)
-            if (!val.empty() && (val[0] == '"' || val[0] == '\'')) {
+            // Check if it's a string (double-quoted)
+            if (!val.empty() && val[0] == '"') {
                 return "string";
+            }
+            // Check if it's a char (single-quoted)
+            else if (val.size() >= 3 && val.front() == '\'' && val.back() == '\'') {
+                return "char";
             }
             // Check if it's a decimal (contains .)
             else if (val.find('.') != std::string::npos) {
@@ -445,8 +494,25 @@ std::string inferType(ASTNode* node) {
             // For arithmetic, infer from left operand
             return inferType(binOp->left);
         }
-        case NodeType::IDENTIFIER:
+        case NodeType::ARRAY_ACCESS: {
+            ArrayAccessNode* arrAcc = static_cast<ArrayAccessNode*>(node);
+            auto it = arrayElementTypes.find(arrAcc->varName);
+            if (it != arrayElementTypes.end()) {
+                return it->second;
+            }
             return "auto";
+        }
+        case NodeType::FUNCTION_CALL:
+            return "auto";
+        case NodeType::IDENTIFIER:
+        {
+            IdentifierNode* id = static_cast<IdentifierNode*>(node);
+            auto it = symbolTypes.find(id->name);
+            if (it != symbolTypes.end()) {
+                return it->second;
+            }
+            return "auto";
+        }
         default:
             return "auto";
     }
@@ -458,6 +524,8 @@ std::string generateExpression(ASTNode* node) {
     switch (node->type) {
         case NodeType::LITERAL: {
             LiteralNode* lit = static_cast<LiteralNode*>(node);
+            if (lit->value == "insaaf") return "true";
+            if (lit->value == "abbas") return "false";
             return lit->value;
         }
         case NodeType::IDENTIFIER: {
@@ -485,6 +553,10 @@ std::string generateExpression(ASTNode* node) {
         case NodeType::ARRAY_ACCESS: {
             ArrayAccessNode* arrAcc = static_cast<ArrayAccessNode*>(node);
             std::string index = generateExpression(arrAcc->index);
+            auto typeIt = arrayElementTypes.find(arrAcc->varName);
+            if (typeIt != arrayElementTypes.end() && isHeterogeneousElementType(typeIt->second)) {
+                return arrAcc->varName + "[" + index + "]";
+            }
             return arrAcc->varName + "[" + index + "]";
         }
         case NodeType::FUNCTION_CALL: {
@@ -511,7 +583,33 @@ void generateCode(ASTNode* node, FILE* out) {
             fprintf(out, "#include <iostream>\n");
             fprintf(out, "#include <cmath>\n");
             fprintf(out, "#include <string>\n");
+            fprintf(out, "#include <vector>\n");
             fprintf(out, "using namespace std;\n\n");
+            fprintf(out, "struct RSValue {\n");
+            fprintf(out, "    enum Type { INT_T, DOUBLE_T, STRING_T, CHAR_T, BOOL_T } type;\n");
+            fprintf(out, "    int i;\n");
+            fprintf(out, "    double d;\n");
+            fprintf(out, "    string s;\n");
+            fprintf(out, "    char c;\n");
+            fprintf(out, "    bool b;\n\n");
+            fprintf(out, "    RSValue() : type(INT_T), i(0), d(0.0), s(\"\"), c('\\0'), b(false) {}\n");
+            fprintf(out, "    RSValue(int v) : type(INT_T), i(v), d(0.0), s(\"\"), c('\\0'), b(false) {}\n");
+            fprintf(out, "    RSValue(double v) : type(DOUBLE_T), i(0), d(v), s(\"\"), c('\\0'), b(false) {}\n");
+            fprintf(out, "    RSValue(const string& v) : type(STRING_T), i(0), d(0.0), s(v), c('\\0'), b(false) {}\n");
+            fprintf(out, "    RSValue(const char* v) : type(STRING_T), i(0), d(0.0), s(v), c('\\0'), b(false) {}\n");
+            fprintf(out, "    RSValue(char v) : type(CHAR_T), i(0), d(0.0), s(\"\"), c(v), b(false) {}\n");
+            fprintf(out, "    RSValue(bool v) : type(BOOL_T), i(0), d(0.0), s(\"\"), c('\\0'), b(v) {}\n");
+            fprintf(out, "};\n\n");
+            fprintf(out, "ostream& operator<<(ostream& os, const RSValue& v) {\n");
+            fprintf(out, "    switch (v.type) {\n");
+            fprintf(out, "        case RSValue::INT_T: os << v.i; break;\n");
+            fprintf(out, "        case RSValue::DOUBLE_T: os << v.d; break;\n");
+            fprintf(out, "        case RSValue::STRING_T: os << v.s; break;\n");
+            fprintf(out, "        case RSValue::CHAR_T: os << v.c; break;\n");
+            fprintf(out, "        case RSValue::BOOL_T: os << (v.b ? \"true\" : \"false\"); break;\n");
+            fprintf(out, "    }\n");
+            fprintf(out, "    return os;\n");
+            fprintf(out, "}\n\n");
             
             StatementListNode* stmts = prog->statements;
             
@@ -553,11 +651,19 @@ void generateCode(ASTNode* node, FILE* out) {
             if (assign->inferType) {
                 cppType = inferType(assign->value);
             }
-            
-            fprintf(out, "%s %s = %s;\n", 
-                    cppType.c_str(), 
-                    assign->varName.c_str(), 
-                    value.c_str());
+
+            auto it = symbolTypes.find(assign->varName);
+            if (it == symbolTypes.end()) {
+                fprintf(out, "%s %s = %s;\n",
+                        cppType.c_str(),
+                        assign->varName.c_str(),
+                        value.c_str());
+            } else {
+                fprintf(out, "%s = %s;\n",
+                        assign->varName.c_str(),
+                        value.c_str());
+            }
+            symbolTypes[assign->varName] = cppType;
             break;
         }
         case NodeType::COMPOUND_ASSIGNMENT: {
@@ -647,9 +753,31 @@ void generateCode(ASTNode* node, FILE* out) {
         case NodeType::ARRAY_DECL: {
             ArrayDeclNode* arrDecl = static_cast<ArrayDeclNode*>(node);
             if (arrDecl->initialValues.empty()) {
-                fprintf(out, "int %s[%d];\n", arrDecl->varName.c_str(), arrDecl->size);
+                if (arrDecl->size > 0) {
+                    // Fixed-size declaration keeps homogeneous int behavior.
+                    fprintf(out, "vector<int> %s(%d);\n", arrDecl->varName.c_str(), arrDecl->size);
+                    symbolTypes[arrDecl->varName] = "vector<int>";
+                    arrayElementTypes[arrDecl->varName] = "int";
+                } else {
+                    // Empty brace declaration starts as heterogeneous dynamic array.
+                    fprintf(out, "vector<RSValue> %s;\n", arrDecl->varName.c_str());
+                    heteroArrays.insert(arrDecl->varName);
+                    symbolTypes[arrDecl->varName] = "vector<RSValue>";
+                    arrayElementTypes[arrDecl->varName] = "RSValue";
+                }
             } else {
-                fprintf(out, "int %s[] = {", arrDecl->varName.c_str());
+                bool isHetero = isArrayDeclaredHeterogeneous(arrDecl);
+                if (isHetero) {
+                    fprintf(out, "vector<RSValue> %s = {", arrDecl->varName.c_str());
+                    heteroArrays.insert(arrDecl->varName);
+                    arrayElementTypes[arrDecl->varName] = "RSValue";
+                    symbolTypes[arrDecl->varName] = "vector<RSValue>";
+                } else {
+                    std::string elemType = inferType(arrDecl->initialValues[0]);
+                    fprintf(out, "vector<%s> %s = {", elemType.c_str(), arrDecl->varName.c_str());
+                    arrayElementTypes[arrDecl->varName] = elemType;
+                    symbolTypes[arrDecl->varName] = "vector<" + elemType + ">";
+                }
                 for (size_t i = 0; i < arrDecl->initialValues.size(); i++) {
                     std::string val = generateExpression(arrDecl->initialValues[i]);
                     fprintf(out, "%s", val.c_str());
@@ -664,6 +792,17 @@ void generateCode(ASTNode* node, FILE* out) {
             std::string index = generateExpression(arrAssign->arrayAccess->index);
             std::string value = generateExpression(arrAssign->value);
             fprintf(out, "%s[%s] = %s;\n", arrAssign->arrayAccess->varName.c_str(), index.c_str(), value.c_str());
+            break;
+        }
+        case NodeType::ARRAY_PUSH: {
+            ArrayPushNode* arrPush = static_cast<ArrayPushNode*>(node);
+            std::string value = generateExpression(arrPush->value);
+            fprintf(out, "%s.push_back(%s);\n", arrPush->varName.c_str(), value.c_str());
+            break;
+        }
+        case NodeType::ARRAY_POP: {
+            ArrayPopNode* arrPop = static_cast<ArrayPopNode*>(node);
+            fprintf(out, "if (!%s.empty()) %s.pop_back();\n", arrPop->varName.c_str(), arrPop->varName.c_str());
             break;
         }
         case NodeType::FUNCTION_CALL: {

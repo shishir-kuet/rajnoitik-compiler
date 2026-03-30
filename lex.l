@@ -60,6 +60,8 @@ ID         {LETTER}({LETTER}|{DIGIT})*
 
 "chandaDe"         return READ;
 "khelaHobe"        return PRINT;
+"barao"            return BARAO;
+"komao"            return KOMAO;
 
 "FileChanda"       return READ_FILE;
 "FileKhela"        return WRITE_FILE;
@@ -125,6 +127,7 @@ ID         {LETTER}({LETTER}|{DIGIT})*
 ":"     return COLON;
 ";"     return SEMICOLON;
 ","     return COMMA;
+"."     return DOT;
 "("     return LPAREN;
 ")"     return RPAREN;
 "["     return LBRACKET;
